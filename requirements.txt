@@ -3,3 +3,5 @@ uvicorn
 httpx
 openai
 groq
+sqlalchemy
+psycopg2-binary
