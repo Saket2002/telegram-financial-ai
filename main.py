@@ -1,7 +1,6 @@
 import os
 import uvicorn
 import httpx
-import yfinance as yf
 from fastapi import FastAPI, Request, BackgroundTasks
 from openai import OpenAI
 
@@ -16,18 +15,17 @@ client = OpenAI(
     api_key=GROQ_API_KEY
 ) if GROQ_API_KEY else None
 
-# Memory store for user onboarding and watchlists
 user_profiles = {}
 
 SYSTEM_PROMPT = """
 You are an executive AI Financial Analyst inside Telegram.
-Your goal is to save the user time by providing concise, actionable financial intelligence.
+You provide precise, real-time financial intelligence to save users time.
 
 Rules:
-1. Speak concisely like a senior equity research analyst.
-2. Focus on WHY metrics move and WHAT matters for financial decisions.
-3. Use clean Telegram Markdown (bold metrics, bullet points).
-4. Do NOT use command language, slash commands, or menus. Keep interactions completely conversational.
+1. Always use the provided Live Market Context for prices, market caps, and ratios.
+2. NEVER mention knowledge cutoffs or tell users to check external websites.
+3. Keep responses concise, structured, and easy to read using bold Markdown.
+4. Do not use slash commands or menu language—be completely conversational.
 """
 
 async def send_message(chat_id: int, text: str):
@@ -41,19 +39,28 @@ async def send_message(chat_id: int, text: str):
             }
         )
 
-def fetch_stock_data(ticker_symbol: str) -> str:
-    """Helper to pull real-time stock info via yfinance"""
+async def fetch_stock_data_api(symbol: str) -> str:
+    """Direct Yahoo Finance API fetch bypassing scraper blocks"""
+    symbol = symbol.strip().upper()
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1d"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    
     try:
-        ticker = yf.Ticker(ticker_symbol.strip().upper())
-        info = ticker.info
-        price = info.get("currentPrice") or info.get("regularMarketPrice")
-        currency = info.get("currency", "USD")
-        name = info.get("shortName", ticker_symbol)
-        pe_ratio = info.get("forwardPE", "N/A")
-        market_cap = info.get("marketCap", "N/A")
-        
-        if price:
-            return f"Live Market Data for {name} ({ticker_symbol.upper()}): Current Price = {price} {currency}, Forward P/E = {pe_ratio}, Market Cap = {market_cap}."
+        async with httpx.AsyncClient() as client_http:
+            res = await client_http.get(url, headers=headers, timeout=5.0)
+            if res.status_code == 200:
+                meta = res.json()["chart"]["result"][0]["meta"]
+                price = meta.get("regularMarketPrice")
+                currency = meta.get("currency", "USD")
+                prev_close = meta.get("chartPreviousClose")
+                change_pct = round(((price - prev_close) / prev_close) * 100, 2) if prev_close else 0
+                
+                return (
+                    f"LIVE MARKET DATA FOR {symbol}:\n"
+                    f"- Current Price: ${price} {currency}\n"
+                    f"- Daily Change: {change_pct}%\n"
+                    f"- Previous Close: ${prev_close}"
+                )
     except Exception:
         pass
     return ""
@@ -64,8 +71,8 @@ async def handle_onboarding(chat_id: int, user_text: str) -> bool:
     if profile["step"] == 0:
         greeting = (
             "Welcome! I am your personal AI Financial Analyst.\n\n"
-            "To help me tailor research and briefings to your workflow, "
-            "**what best describes your role?** (e.g., *Investor, Equity Analyst, Founder, Finance Student, or VP of Finance*)"
+            "To help me tailor research and market briefings to your workflow, "
+            "**what best describes your role?** (e.g., *Investor, Equity Analyst, Founder, VP of Finance*)"
         )
         user_profiles[chat_id] = {"step": 1, "role": None, "watchlist": []}
         await send_message(chat_id, greeting)
@@ -87,7 +94,7 @@ async def handle_onboarding(chat_id: int, user_text: str) -> bool:
     elif profile["step"] == 2:
         watchlist_items = [item.strip().upper() for item in user_text.split(",")]
         profile["watchlist"] = watchlist_items
-        profile["step"] = 3  # Onboarding complete
+        profile["step"] = 3
         user_profiles[chat_id] = profile
         
         confirmation = (
@@ -101,31 +108,36 @@ async def handle_onboarding(chat_id: int, user_text: str) -> bool:
     return False
 
 async def process_and_reply(chat_id: int, user_text: str):
-    # Trigger onboarding if new user or on explicit restart
+    # Check if user needs onboarding
     if chat_id not in user_profiles or user_profiles[chat_id]["step"] < 3:
         if user_text.lower().strip() in ["hello", "hi", "start", "/start"]:
             user_profiles[chat_id] = {"step": 0, "role": None, "watchlist": []}
         if await handle_onboarding(chat_id, user_text):
             return
 
-    # Normal AI Analysis Flow
+    # Extract ticker candidates from message
+    words = [w.strip("?,.!") for w in user_text.upper().split()]
+    market_context = ""
+    
+    # Common financial tickers map
+    known_tickers = ["NVDA", "AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "META", "AMD", "INTC"]
+    
+    for word in words:
+        if word in known_tickers or (len(word) <= 5 and word.isalpha()):
+            stock_info = await fetch_stock_data_api(word)
+            if stock_info:
+                market_context += f"\n{stock_info}"
+                break
+
     profile = user_profiles.get(chat_id, {})
     user_role = profile.get("role", "Finance Professional")
     watchlist = profile.get("watchlist", [])
-    
-    # Check if user mentioned a ticker in their message to fetch live data
-    market_context = ""
-    for token in user_text.replace("?", "").split():
-        if len(token) <= 5 and token.isalpha():
-            data = fetch_stock_data(token)
-            if data:
-                market_context += f"\n{data}"
-                break
 
     context_prompt = (
         f"{SYSTEM_PROMPT}\n\n"
-        f"User Profile: Role = {user_role}, Saved Watchlist = {', '.join(watchlist)}.\n"
-        f"Live Market Context: {market_context}"
+        f"User Role: {user_role}\n"
+        f"User Watchlist: {', '.join(watchlist)}\n"
+        f"Live Market Context: {market_context if market_context else 'No live feed available for this query.'}"
     )
 
     try:
