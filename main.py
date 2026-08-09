@@ -1,6 +1,7 @@
 import os
 import uvicorn
 import httpx
+import yfinance as yf
 from fastapi import FastAPI, Request, BackgroundTasks
 from openai import OpenAI
 
@@ -15,18 +16,18 @@ client = OpenAI(
     api_key=GROQ_API_KEY
 ) if GROQ_API_KEY else None
 
-# In-memory session store (Replace with PostgreSQL query in production)
-user_states = {}
+# Memory store for user onboarding and watchlists
+user_profiles = {}
 
 SYSTEM_PROMPT = """
 You are an executive AI Financial Analyst inside Telegram.
-Your primary objective is saving the user time by surfacing actionable financial intelligence.
+Your goal is to save the user time by providing concise, actionable financial intelligence.
 
 Rules:
-1. Speak concisely like a senior equity research analyst or VP of Finance.
-2. Focus on WHY metrics move and WHAT matters for decisions.
-3. Format output cleanly using Telegram Markdown (bolding key figures, clear bullet points).
-4. Do NOT mention slash commands, menus, or buttons. Keep everything conversational.
+1. Speak concisely like a senior equity research analyst.
+2. Focus on WHY metrics move and WHAT matters for financial decisions.
+3. Use clean Telegram Markdown (bold metrics, bullet points).
+4. Do NOT use command language, slash commands, or menus. Keep interactions completely conversational.
 """
 
 async def send_message(chat_id: int, text: str):
@@ -40,65 +41,98 @@ async def send_message(chat_id: int, text: str):
             }
         )
 
-async def handle_conversational_onboarding(chat_id: int, user_text: str):
-    state = user_states.get(chat_id, {"step": 0, "role": None, "watchlist": []})
+def fetch_stock_data(ticker_symbol: str) -> str:
+    """Helper to pull real-time stock info via yfinance"""
+    try:
+        ticker = yf.Ticker(ticker_symbol.strip().upper())
+        info = ticker.info
+        price = info.get("currentPrice") or info.get("regularMarketPrice")
+        currency = info.get("currency", "USD")
+        name = info.get("shortName", ticker_symbol)
+        pe_ratio = info.get("forwardPE", "N/A")
+        market_cap = info.get("marketCap", "N/A")
+        
+        if price:
+            return f"Live Market Data for {name} ({ticker_symbol.upper()}): Current Price = {price} {currency}, Forward P/E = {pe_ratio}, Market Cap = {market_cap}."
+    except Exception:
+        pass
+    return ""
+
+async def handle_onboarding(chat_id: int, user_text: str) -> bool:
+    profile = user_profiles.get(chat_id, {"step": 0, "role": None, "watchlist": []})
     
-    if state["step"] == 0:
-        welcome_text = (
+    if profile["step"] == 0:
+        greeting = (
             "Welcome! I am your personal AI Financial Analyst.\n\n"
-            "To help me tailor my research and market briefings to your daily workflow, "
-            "**what best describes your role?** (e.g., Investor, Analyst, Founder, Finance Student, or Corporate Finance)"
+            "To help me tailor research and briefings to your workflow, "
+            "**what best describes your role?** (e.g., *Investor, Equity Analyst, Founder, Finance Student, or VP of Finance*)"
         )
-        user_states[chat_id] = {"step": 1, "role": None, "watchlist": []}
-        await send_message(chat_id, welcome_text)
+        user_profiles[chat_id] = {"step": 1, "role": None, "watchlist": []}
+        await send_message(chat_id, greeting)
         return True
 
-    elif state["step"] == 1:
-        state["role"] = user_text
-        state["step"] = 2
-        user_states[chat_id] = state
+    elif profile["step"] == 1:
+        profile["role"] = user_text
+        profile["step"] = 2
+        user_profiles[chat_id] = profile
         
         reply = (
-            f"Got it—customizing insights for a **{user_text}**.\n\n"
+            f"Got it—customizing intelligence for a **{user_text}**.\n\n"
             "Which key companies, tickers, or sectors do you follow most closely? "
-            "(e.g., *Nvidia, Apple, Indian Banking Sector, Semiconductor industry*)"
+            "(e.g., *Nvidia, Apple, TSLA, Semiconductor industry*)"
         )
         await send_message(chat_id, reply)
         return True
 
-    elif state["step"] == 2:
-        state["watchlist"] = [item.strip() for item in user_text.split(",")]
-        state["step"] = 3 # Onboarding finished
-        user_states[chat_id] = state
+    elif profile["step"] == 2:
+        watchlist_items = [item.strip().upper() for item in user_text.split(",")]
+        profile["watchlist"] = watchlist_items
+        profile["step"] = 3  # Onboarding complete
+        user_profiles[chat_id] = profile
         
         confirmation = (
-            f"Perfect. I've locked in your focus areas: **{', '.join(state['watchlist'])}**.\n\n"
+            f"Perfect. I've configured your focus areas: **{', '.join(watchlist_items)}**.\n\n"
             "I will tailor all financial research, metric comparisons, and briefings to these priorities. "
             "How can I assist your workflow right now?"
         )
         await send_message(chat_id, confirmation)
         return True
 
-    return False # Onboarding complete, proceed to normal AI workflow
+    return False
 
 async def process_and_reply(chat_id: int, user_text: str):
-    # Check if user needs or is currently in onboarding
-    if chat_id not in user_states or user_states[chat_id]["step"] < 3:
-        if user_text.lower().strip() in ["hello", "hi", "/start", "start"]:
-            user_states[chat_id] = {"step": 0, "role": None, "watchlist": []}
-        is_onboarding = await handle_conversational_onboarding(chat_id, user_text)
-        if is_onboarding:
+    # Trigger onboarding if new user or on explicit restart
+    if chat_id not in user_profiles or user_profiles[chat_id]["step"] < 3:
+        if user_text.lower().strip() in ["hello", "hi", "start", "/start"]:
+            user_profiles[chat_id] = {"step": 0, "role": None, "watchlist": []}
+        if await handle_onboarding(chat_id, user_text):
             return
 
-    # Normal Conversational AI Workflow with Memory Context
-    user_profile = user_states.get(chat_id, {})
-    role_context = f"User Role: {user_profile.get('role', 'Finance Professional')}\nWatchlist: {', '.join(user_profile.get('watchlist', []))}"
+    # Normal AI Analysis Flow
+    profile = user_profiles.get(chat_id, {})
+    user_role = profile.get("role", "Finance Professional")
+    watchlist = profile.get("watchlist", [])
     
+    # Check if user mentioned a ticker in their message to fetch live data
+    market_context = ""
+    for token in user_text.replace("?", "").split():
+        if len(token) <= 5 and token.isalpha():
+            data = fetch_stock_data(token)
+            if data:
+                market_context += f"\n{data}"
+                break
+
+    context_prompt = (
+        f"{SYSTEM_PROMPT}\n\n"
+        f"User Profile: Role = {user_role}, Saved Watchlist = {', '.join(watchlist)}.\n"
+        f"Live Market Context: {market_context}"
+    )
+
     try:
         response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[
-                {"role": "system", "content": f"{SYSTEM_PROMPT}\n\n{role_context}"},
+                {"role": "system", "content": context_prompt},
                 {"role": "user", "content": user_text}
             ],
             temperature=0.2
