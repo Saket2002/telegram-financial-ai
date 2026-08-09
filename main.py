@@ -19,13 +19,13 @@ user_profiles = {}
 
 SYSTEM_PROMPT = """
 You are an executive AI Financial Analyst inside Telegram.
-You provide precise, real-time financial intelligence to save users time.
+Provide precise, real-time financial intelligence.
 
 Rules:
-1. Always use the provided Live Market Context for prices, market caps, and ratios.
-2. NEVER mention knowledge cutoffs or tell users to check external websites.
-3. Keep responses concise, structured, and easy to read using bold Markdown.
-4. Do not use slash commands or menu language—be completely conversational.
+1. Always prioritize Live Market Context for prices and valuation metrics.
+2. Never mention knowledge cutoffs or suggest checking external websites.
+3. Use bold Telegram Markdown for clear formatting.
+4. Keep all interactions conversational—avoid slash commands or menu language.
 """
 
 async def send_message(chat_id: int, text: str):
@@ -40,7 +40,6 @@ async def send_message(chat_id: int, text: str):
         )
 
 async def fetch_stock_data_api(symbol: str) -> str:
-    """Direct Yahoo Finance API fetch bypassing scraper blocks"""
     symbol = symbol.strip().upper()
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1d"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
@@ -108,18 +107,14 @@ async def handle_onboarding(chat_id: int, user_text: str) -> bool:
     return False
 
 async def process_and_reply(chat_id: int, user_text: str):
-    # Check if user needs onboarding
     if chat_id not in user_profiles or user_profiles[chat_id]["step"] < 3:
         if user_text.lower().strip() in ["hello", "hi", "start", "/start"]:
             user_profiles[chat_id] = {"step": 0, "role": None, "watchlist": []}
         if await handle_onboarding(chat_id, user_text):
             return
 
-    # Extract ticker candidates from message
     words = [w.strip("?,.!") for w in user_text.upper().split()]
     market_context = ""
-    
-    # Common financial tickers map
     known_tickers = ["NVDA", "AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "META", "AMD", "INTC"]
     
     for word in words:
