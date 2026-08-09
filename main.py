@@ -6,7 +6,7 @@ from openai import OpenAI
 app = FastAPI()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-GROQ_API_KEY = os.getenv("OPENAI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 # Initialize Client using Groq's OpenAI-compatible base URL
@@ -17,10 +17,10 @@ client = OpenAI(
 
 async def process_and_reply(chat_id: int, user_text: str):
     if not client:
-        reply = "Error: OPENAI_API_KEY environment variable is missing."
+        reply = "Error: GROQ_API_KEY environment variable is missing on Render."
     else:
         try:
-            # Generate AI response using Llama 3 on Groq
+            # Generate AI response using Llama 3.3 70B on Groq
             response = client.chat.completions.create(
                 model="llama-3.3-70b-versatile",
                 messages=[
