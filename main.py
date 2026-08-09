@@ -6,6 +6,13 @@ from fastapi import FastAPI, Request, BackgroundTasks
 from openai import OpenAI
 from groq import Groq
 
+from database import (
+    init_db, 
+    get_user_profile_db, 
+    update_user_profile_db, 
+    log_chat_history
+)
+
 app = FastAPI()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -20,8 +27,6 @@ openai_client = OpenAI(
     api_key=GROQ_API_KEY
 ) if GROQ_API_KEY else None
 
-user_profiles = {}
-
 SYSTEM_PROMPT = """
 You are an executive AI Financial Analyst inside Telegram.
 Your primary job is delivering live, actionable financial intelligence concisely to save users time.
@@ -33,8 +38,11 @@ CRITICAL INSTRUCTIONS:
 4. Keep all interactions conversational and executive—avoid slash commands or menu language.
 """
 
+@app.on_event("startup")
+def startup_event():
+    init_db()
+
 async def send_message(chat_id: int, text: str):
-    """Sends Markdown formatted message back to Telegram user"""
     async with httpx.AsyncClient() as http_client:
         await http_client.post(
             f"{TELEGRAM_API_URL}/sendMessage",
@@ -46,7 +54,6 @@ async def send_message(chat_id: int, text: str):
         )
 
 async def fetch_index_quote(query_text: str) -> str:
-    """Fetch live index data for NIFTY (NSEI), SENSEX, BANKNIFTY, S&P500, NASDAQ"""
     index_map = {
         "NSEI": ("NIFTY 50", "^NSEI"),
         "^NSEI": ("NIFTY 50", "^NSEI"),
@@ -94,7 +101,6 @@ async def fetch_index_quote(query_text: str) -> str:
     return ""
 
 async def fetch_finnhub_quote(symbol: str) -> str:
-    """Fetch individual stock quote from Finnhub API"""
     if not FINNHUB_API_KEY:
         return ""
     symbol = symbol.strip().upper()
@@ -120,17 +126,12 @@ async def fetch_finnhub_quote(symbol: str) -> str:
     return ""
 
 async def handle_onboarding(chat_id: int, user_text: str) -> bool:
-    """Conversational onboarding sequence with smart market intent bypass"""
-    profile = user_profiles.get(chat_id, {"step": 0, "role": None, "watchlist": []})
+    profile = get_user_profile_db(chat_id)
     text_upper = user_text.upper()
 
     financial_keywords = ["PRICE", "STOCK", "NVDA", "AAPL", "MSFT", "NIFTY", "NSEI", "SENSEX", "VALUATION", "MARKET"]
     if any(keyword in text_upper for keyword in financial_keywords) and profile["step"] in [1, 2]:
-        user_profiles[chat_id] = {
-            "step": 3,
-            "role": "Finance Professional",
-            "watchlist": ["NVDA", "AAPL", "NIFTY"]
-        }
+        update_user_profile_db(chat_id, step=3, role="Finance Professional", watchlist=["NVDA", "AAPL", "NIFTY"])
         return False
 
     if profile["step"] == 0:
@@ -139,17 +140,16 @@ async def handle_onboarding(chat_id: int, user_text: str) -> bool:
             "To help me tailor research and briefings to your workflow, "
             "**what best describes your role?** (e.g., *Investor, Equity Analyst, Founder, VP of Finance*)"
         )
-        user_profiles[chat_id] = {"step": 1, "role": None, "watchlist": []}
+        update_user_profile_db(chat_id, step=1)
         await send_message(chat_id, greeting)
         return True
 
     elif profile["step"] == 1:
-        profile["role"] = user_text.strip()
-        profile["step"] = 2
-        user_profiles[chat_id] = profile
+        role_text = user_text.strip()
+        update_user_profile_db(chat_id, step=2, role=role_text)
 
         reply = (
-            f"Got it—customizing intelligence for a **{user_text.strip()}**.\n\n"
+            f"Got it—customizing intelligence for a **{role_text}**.\n\n"
             "Which key companies, tickers, or sectors do you follow most closely? "
             "(e.g., *Nvidia, Apple, NIFTY 50, TSLA*)"
         )
@@ -158,9 +158,7 @@ async def handle_onboarding(chat_id: int, user_text: str) -> bool:
 
     elif profile["step"] == 2:
         watchlist_items = [item.strip().upper() for item in user_text.split(",")]
-        profile["watchlist"] = watchlist_items
-        profile["step"] = 3
-        user_profiles[chat_id] = profile
+        update_user_profile_db(chat_id, step=3, watchlist=watchlist_items)
 
         confirmation = (
             f"Perfect. I've configured your focus areas: **{', '.join(watchlist_items)}**.\n\n"
@@ -172,20 +170,20 @@ async def handle_onboarding(chat_id: int, user_text: str) -> bool:
 
     return False
 
-async def process_and_reply(chat_id: int, user_text: str = None, voice_file_id: str = None):
+async def process_and_reply(chat_id: int, user_text: str = None):
     if not user_text:
         return
 
-    if chat_id not in user_profiles or user_profiles[chat_id]["step"] < 3:
+    profile = get_user_profile_db(chat_id)
+
+    if profile["step"] < 3:
         if user_text.lower().strip() in ["hello", "hi", "start", "/start"]:
-            user_profiles[chat_id] = {"step": 0, "role": None, "watchlist": []}
+            update_user_profile_db(chat_id, step=0)
         if await handle_onboarding(chat_id, user_text):
             return
 
-    # 1. Fetch Index Data First (NSEI, NIFTY, SENSEX)
     market_context = await fetch_index_quote(user_text)
 
-    # 2. Fallback to Equity Stock Quote (NVDA, AAPL)
     if not market_context:
         name_map = {
             "NVIDIA": "NVDA", "APPLE": "AAPL", "MICROSOFT": "MSFT", 
@@ -208,9 +206,9 @@ async def process_and_reply(chat_id: int, user_text: str = None, voice_file_id: 
         if target_ticker:
             market_context = await fetch_finnhub_quote(target_ticker)
 
-    profile = user_profiles.get(chat_id, {})
-    user_role = profile.get("role", "Finance Professional")
-    watchlist = profile.get("watchlist", [])
+    profile = get_user_profile_db(chat_id)
+    user_role = profile["role"] if profile["role"] else "Finance Professional"
+    watchlist = profile["watchlist"] if profile["watchlist"] else []
 
     context_prompt = (
         f"{SYSTEM_PROMPT}\n\n"
@@ -232,6 +230,7 @@ async def process_and_reply(chat_id: int, user_text: str = None, voice_file_id: 
     except Exception as e:
         reply = f"Analysis Error: {str(e)}"
 
+    log_chat_history(chat_id, user_text, reply)
     await send_message(chat_id, reply)
 
 @app.post("/webhook")
