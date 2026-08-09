@@ -1,7 +1,7 @@
 import os
+import re
 import uvicorn
 import httpx
-import re
 from fastapi import FastAPI, Request, BackgroundTasks
 from openai import OpenAI
 
@@ -18,16 +18,15 @@ client = OpenAI(
 
 user_profiles = {}
 
-# Strict system prompt forbidding knowledge cutoff disclaimers
 SYSTEM_PROMPT = """
 You are an executive AI Financial Analyst inside Telegram.
-Your primary job is delivering live financial intelligence accurately and concisely.
+Your core priority is providing precise, real-time market data to save users time.
 
-CRITICAL INSTRUCTIONS:
-1. ALWAYS use the provided 'Live Market Context' for current prices, changes, and valuation metrics.
-2. NEVER say 'as of my last update', 'knowledge cutoff', or tell the user to check Yahoo/Google Finance.
-3. Present the financial figures directly in clean Telegram Markdown with bold key numbers.
-4. Keep all responses conversational and professional.
+RULES:
+1. Always use the provided 'Live Market Context' for current stock prices and valuations.
+2. NEVER mention knowledge cutoffs, training dates, or tell the user to check external websites.
+3. Format output cleanly in Telegram Markdown with bold key numbers.
+4. Keep answers concise, direct, and conversational.
 """
 
 async def send_message(chat_id: int, text: str):
@@ -41,30 +40,38 @@ async def send_message(chat_id: int, text: str):
             }
         )
 
-async def fetch_stock_data_api(symbol: str) -> str:
-    """Fetch live quote directly from Yahoo Finance API"""
+async def fetch_live_quote(symbol: str) -> str:
+    """Fetches real-time price using Yahoo Finance mobile quote endpoint"""
     symbol = symbol.strip().upper()
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1d"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}?modules=price,summaryDetail,defaultKeyStatistics"
     
+    headers = {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
+    }
+
     try:
         async with httpx.AsyncClient() as client_http:
-            res = await client_http.get(url, headers=headers, timeout=5.0)
+            res = await client_http.get(url, headers=headers, timeout=6.0)
             if res.status_code == 200:
-                meta = res.json()["chart"]["result"][0]["meta"]
-                price = meta.get("regularMarketPrice")
-                currency = meta.get("currency", "USD")
-                prev_close = meta.get("chartPreviousClose")
-                change_pct = round(((price - prev_close) / prev_close) * 100, 2) if prev_close else 0
+                data = res.json()["quoteSummary"]["result"][0]
+                price_data = data.get("price", {})
                 
-                return (
-                    f"REAL-TIME MARKET DATA FOR {symbol}:\n"
-                    f"- Current Price: ${price} {currency}\n"
-                    f"- Daily Change: {change_pct}%\n"
-                    f"- Previous Close: ${prev_close}"
-                )
+                price = price_data.get("regularMarketPrice", {}).get("raw")
+                currency = price_data.get("currency", "USD")
+                change_pct = price_data.get("regularMarketChangePercent", {}).get("fmt", "0%")
+                market_cap = price_data.get("marketCap", {}).get("fmt", "N/A")
+                short_name = price_data.get("shortName", symbol)
+                
+                if price:
+                    return (
+                        f"LIVE REAL-TIME DATA FOR {short_name} ({symbol}):\n"
+                        f"- Current Stock Price: ${price:.2f} {currency}\n"
+                        f"- Today's Change: {change_pct}\n"
+                        f"- Market Capitalization: {market_cap}"
+                    )
     except Exception as e:
-        print(f"Error fetching stock data: {e}")
+        print(f"Fetch error for {symbol}: {e}")
+
     return ""
 
 async def handle_onboarding(chat_id: int, user_text: str) -> bool:
@@ -73,7 +80,7 @@ async def handle_onboarding(chat_id: int, user_text: str) -> bool:
     if profile["step"] == 0:
         greeting = (
             "Welcome! I am your personal AI Financial Analyst.\n\n"
-            "To help me tailor research and briefings to your workflow, "
+            "To help me tailor research and briefings to your daily workflow, "
             "**what best describes your role?** (e.g., *Investor, Equity Analyst, Founder, VP of Finance*)"
         )
         user_profiles[chat_id] = {"step": 1, "role": None, "watchlist": []}
@@ -110,39 +117,35 @@ async def handle_onboarding(chat_id: int, user_text: str) -> bool:
     return False
 
 async def process_and_reply(chat_id: int, user_text: str):
-    # Check onboarding state
     if chat_id not in user_profiles or user_profiles[chat_id]["step"] < 3:
         if user_text.lower().strip() in ["hello", "hi", "start", "/start"]:
             user_profiles[chat_id] = {"step": 0, "role": None, "watchlist": []}
         if await handle_onboarding(chat_id, user_text):
             return
 
-    # Advanced Ticker Extraction using Regex
-    ticker_match = re.findall(r'\b[A-Z]{2,5}\b', user_text.upper())
-    
-    # Common company name to ticker mapping fallback
-    name_to_ticker = {
+    # Match company names or stock symbols
+    name_map = {
         "NVIDIA": "NVDA", "APPLE": "AAPL", "MICROSOFT": "MSFT", 
         "GOOGLE": "GOOGL", "AMAZON": "AMZN", "TESLA": "TSLA", "META": "META"
     }
     
     target_ticker = None
-    for token in user_text.upper().split():
-        clean_token = re.sub(r'[^A-Z]', '', token)
-        if clean_token in name_to_ticker:
-            target_ticker = name_to_ticker[clean_token]
+    for word in user_text.upper().split():
+        clean_word = re.sub(r'[^A-Z]', '', word)
+        if clean_word in name_map:
+            target_ticker = name_map[clean_word]
             break
 
-    if not target_ticker and ticker_match:
-        # Exclude non-ticker English words
-        ignore_words = {"WHAT", "PRICE", "STOCK", "SHOW", "TELL", "WITH", "FROM", "INTO", "ABOUT"}
-        valid_tickers = [t for t in ticker_match if t not in ignore_words]
-        if valid_tickers:
-            target_ticker = valid_tickers[0]
+    if not target_ticker:
+        matches = re.findall(r'\b[A-Z]{2,5}\b', user_text.upper())
+        ignore = {"WHAT", "PRICE", "STOCK", "TELL", "WITH", "THIS", "FROM", "ABOUT"}
+        valid = [m for m in matches if m not in ignore]
+        if valid:
+            target_ticker = valid[0]
 
     market_context = ""
     if target_ticker:
-        market_context = await fetch_stock_data_api(target_ticker)
+        market_context = await fetch_live_quote(target_ticker)
 
     profile = user_profiles.get(chat_id, {})
     user_role = profile.get("role", "Finance Professional")
@@ -152,7 +155,7 @@ async def process_and_reply(chat_id: int, user_text: str):
         f"{SYSTEM_PROMPT}\n\n"
         f"User Role: {user_role}\n"
         f"User Watchlist: {', '.join(watchlist)}\n"
-        f"Live Market Context:\n{market_context if market_context else 'No live feed available. Answer based on available context without stating cutoff disclaimers.'}"
+        f"Live Market Context:\n{market_context if market_context else 'No live API data available for this request.'}"
     )
 
     try:
