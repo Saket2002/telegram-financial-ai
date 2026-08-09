@@ -54,7 +54,7 @@ async def process_and_reply(chat_id: int, user_text: str = None, voice_id: str =
 
             # Generate AI response
             response = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-2.0-flash",
                 contents=contents,
                 config=types.GenerateContentConfig(system_instruction=system_instruction)
             )
