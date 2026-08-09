@@ -2,4 +2,4 @@ fastapi
 uvicorn
 httpx
 openai
-yfinance
+groq
