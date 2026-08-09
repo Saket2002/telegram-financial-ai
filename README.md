@@ -7,4 +7,4 @@ uvicorn
 
 httpx
 
-openai
+google-genai
