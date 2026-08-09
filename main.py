@@ -9,6 +9,7 @@ app = FastAPI()
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 
 client = OpenAI(
@@ -23,7 +24,7 @@ You are an executive AI Financial Analyst inside Telegram.
 Your core priority is providing precise, real-time market data to save users time.
 
 RULES:
-1. Always use the provided 'Live Market Context' for current stock prices and valuations.
+1. Always prioritize the provided 'Live Market Context' for current prices and valuation metrics.
 2. NEVER mention knowledge cutoffs, training dates, or tell the user to check external websites.
 3. Format output cleanly in Telegram Markdown with bold key numbers.
 4. Keep answers concise, direct, and conversational.
@@ -40,37 +41,32 @@ async def send_message(chat_id: int, text: str):
             }
         )
 
-async def fetch_live_quote(symbol: str) -> str:
-    """Fetches real-time price using Yahoo Finance mobile quote endpoint"""
-    symbol = symbol.strip().upper()
-    url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}?modules=price,summaryDetail,defaultKeyStatistics"
+async def fetch_finnhub_quote(symbol: str) -> str:
+    """Fetch live quote from Finnhub API"""
+    if not FINNHUB_API_KEY:
+        return ""
     
-    headers = {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
-    }
+    symbol = symbol.strip().upper()
+    url = f"https://finnhub.io/api/v1/quote?symbol={symbol}&token={FINNHUB_API_KEY}"
 
     try:
         async with httpx.AsyncClient() as client_http:
-            res = await client_http.get(url, headers=headers, timeout=6.0)
+            res = await client_http.get(url, timeout=5.0)
             if res.status_code == 200:
-                data = res.json()["quoteSummary"]["result"][0]
-                price_data = data.get("price", {})
+                data = res.json()
+                current_price = data.get("c")
+                prev_close = data.get("pc")
                 
-                price = price_data.get("regularMarketPrice", {}).get("raw")
-                currency = price_data.get("currency", "USD")
-                change_pct = price_data.get("regularMarketChangePercent", {}).get("fmt", "0%")
-                market_cap = price_data.get("marketCap", {}).get("fmt", "N/A")
-                short_name = price_data.get("shortName", symbol)
-                
-                if price:
+                if current_price and current_price > 0:
+                    change_pct = round(((current_price - prev_close) / prev_close) * 100, 2) if prev_close else 0
                     return (
-                        f"LIVE REAL-TIME DATA FOR {short_name} ({symbol}):\n"
-                        f"- Current Stock Price: ${price:.2f} {currency}\n"
-                        f"- Today's Change: {change_pct}\n"
-                        f"- Market Capitalization: {market_cap}"
+                        f"REAL-TIME MARKET DATA FOR {symbol}:\n"
+                        f"- Current Price: ${current_price:.2f} USD\n"
+                        f"- Daily Change: {change_pct}%\n"
+                        f"- Previous Close: ${prev_close:.2f} USD"
                     )
     except Exception as e:
-        print(f"Fetch error for {symbol}: {e}")
+        print(f"Finnhub error for {symbol}: {e}")
 
     return ""
 
@@ -123,7 +119,7 @@ async def process_and_reply(chat_id: int, user_text: str):
         if await handle_onboarding(chat_id, user_text):
             return
 
-    # Match company names or stock symbols
+    # Company name to stock ticker map
     name_map = {
         "NVIDIA": "NVDA", "APPLE": "AAPL", "MICROSOFT": "MSFT", 
         "GOOGLE": "GOOGL", "AMAZON": "AMZN", "TESLA": "TSLA", "META": "META"
@@ -145,7 +141,7 @@ async def process_and_reply(chat_id: int, user_text: str):
 
     market_context = ""
     if target_ticker:
-        market_context = await fetch_live_quote(target_ticker)
+        market_context = await fetch_finnhub_quote(target_ticker)
 
     profile = user_profiles.get(chat_id, {})
     user_role = profile.get("role", "Finance Professional")
@@ -155,7 +151,7 @@ async def process_and_reply(chat_id: int, user_text: str):
         f"{SYSTEM_PROMPT}\n\n"
         f"User Role: {user_role}\n"
         f"User Watchlist: {', '.join(watchlist)}\n"
-        f"Live Market Context:\n{market_context if market_context else 'No live API data available for this request.'}"
+        f"Live Market Context:\n{market_context if market_context else 'No live feed available.'}"
     )
 
     try:
