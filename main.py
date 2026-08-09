@@ -34,6 +34,7 @@ CRITICAL INSTRUCTIONS:
 """
 
 async def send_message(chat_id: int, text: str):
+    """Sends Markdown formatted message back to Telegram user"""
     async with httpx.AsyncClient() as http_client:
         await http_client.post(
             f"{TELEGRAM_API_URL}/sendMessage",
@@ -44,8 +45,56 @@ async def send_message(chat_id: int, text: str):
             }
         )
 
+async def fetch_index_quote(query_text: str) -> str:
+    """Fetch live index data for NIFTY (NSEI), SENSEX, BANKNIFTY, S&P500, NASDAQ"""
+    index_map = {
+        "NSEI": ("NIFTY 50", "^NSEI"),
+        "^NSEI": ("NIFTY 50", "^NSEI"),
+        "NIFTY": ("NIFTY 50", "^NSEI"),
+        "NIFTY50": ("NIFTY 50", "^NSEI"),
+        "BANKNIFTY": ("BANK NIFTY", "^NSEBANK"),
+        "SENSEX": ("BSE SENSEX", "^BSESN"),
+        "BSESN": ("BSE SENSEX", "^BSESN"),
+        "SP500": ("S&P 500", "^GSPC"),
+        "NASDAQ": ("NASDAQ Composite", "^IXIC")
+    }
+
+    matched_key = None
+    clean_words = [re.sub(r'[^A-Z0-9^]', '', w) for w in query_text.upper().split()]
+    for word in clean_words:
+        if word in index_map:
+            matched_key = word
+            break
+
+    if not matched_key:
+        return ""
+
+    display_name, symbol = index_map[matched_key]
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1d"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+    try:
+        async with httpx.AsyncClient() as client_http:
+            res = await client_http.get(url, headers=headers, timeout=5.0)
+            if res.status_code == 200:
+                meta = res.json()["chart"]["result"][0]["meta"]
+                price = meta.get("regularMarketPrice")
+                currency = meta.get("currency", "INR")
+                prev_close = meta.get("chartPreviousClose")
+                change_pct = round(((price - prev_close) / prev_close) * 100, 2) if prev_close else 0
+
+                return (
+                    f"REAL-TIME MARKET DATA FOR {display_name} ({symbol}):\n"
+                    f"- Current Index Level: {price:,.2f} {currency}\n"
+                    f"- Daily Change: {change_pct}%\n"
+                    f"- Previous Close: {prev_close:,.2f} {currency}"
+                )
+    except Exception as e:
+        print(f"Index fetch error for {symbol}: {e}")
+    return ""
+
 async def fetch_finnhub_quote(symbol: str) -> str:
-    """Fetch stock quote from Finnhub"""
+    """Fetch individual stock quote from Finnhub API"""
     if not FINNHUB_API_KEY:
         return ""
     symbol = symbol.strip().upper()
@@ -70,46 +119,12 @@ async def fetch_finnhub_quote(symbol: str) -> str:
         print(f"Finnhub error for {symbol}: {e}")
     return ""
 
-async def fetch_index_quote(symbol: str) -> str:
-    """Fetch index quotes (NIFTY, SENSEX) from Yahoo Finance"""
-    symbol_map = {
-        "NIFTY": "^NSEI",
-        "NIFTY50": "^NSEI",
-        "BANKNIFTY": "^NSEBANK",
-        "SENSEX": "^BSESN"
-    }
-    ticker_symbol = symbol_map.get(symbol.strip().upper())
-    if not ticker_symbol:
-        return ""
-
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker_symbol}?interval=1d&range=1d"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    
-    try:
-        async with httpx.AsyncClient() as client_http:
-            res = await client_http.get(url, headers=headers, timeout=5.0)
-            if res.status_code == 200:
-                meta = res.json()["chart"]["result"][0]["meta"]
-                price = meta.get("regularMarketPrice")
-                currency = meta.get("currency", "INR")
-                prev_close = meta.get("chartPreviousClose")
-                change_pct = round(((price - prev_close) / prev_close) * 100, 2) if prev_close else 0
-                
-                return (
-                    f"REAL-TIME MARKET DATA FOR {symbol.upper()}:\n"
-                    f"- Current Index Level: {price:,.2f} {currency}\n"
-                    f"- Daily Change: {change_pct}%\n"
-                    f"- Previous Close: {prev_close:,.2f} {currency}"
-                )
-    except Exception as e:
-        print(f"Index fetch error for {symbol}: {e}")
-    return ""
-
 async def handle_onboarding(chat_id: int, user_text: str) -> bool:
+    """Conversational onboarding sequence with smart market intent bypass"""
     profile = user_profiles.get(chat_id, {"step": 0, "role": None, "watchlist": []})
     text_upper = user_text.upper()
-    
-    financial_keywords = ["PRICE", "STOCK", "NVDA", "AAPL", "MSFT", "NIFTY", "SENSEX", "VALUATION", "MARKET"]
+
+    financial_keywords = ["PRICE", "STOCK", "NVDA", "AAPL", "MSFT", "NIFTY", "NSEI", "SENSEX", "VALUATION", "MARKET"]
     if any(keyword in text_upper for keyword in financial_keywords) and profile["step"] in [1, 2]:
         user_profiles[chat_id] = {
             "step": 3,
@@ -132,7 +147,7 @@ async def handle_onboarding(chat_id: int, user_text: str) -> bool:
         profile["role"] = user_text.strip()
         profile["step"] = 2
         user_profiles[chat_id] = profile
-        
+
         reply = (
             f"Got it—customizing intelligence for a **{user_text.strip()}**.\n\n"
             "Which key companies, tickers, or sectors do you follow most closely? "
@@ -146,7 +161,7 @@ async def handle_onboarding(chat_id: int, user_text: str) -> bool:
         profile["watchlist"] = watchlist_items
         profile["step"] = 3
         user_profiles[chat_id] = profile
-        
+
         confirmation = (
             f"Perfect. I've configured your focus areas: **{', '.join(watchlist_items)}**.\n\n"
             "I will tailor all financial research, metric comparisons, and briefings to these priorities. "
@@ -167,16 +182,10 @@ async def process_and_reply(chat_id: int, user_text: str = None, voice_file_id: 
         if await handle_onboarding(chat_id, user_text):
             return
 
-    # Check for Index Query first
-    index_keywords = ["NIFTY", "NIFTY50", "BANKNIFTY", "SENSEX"]
-    market_context = ""
-    
-    for kw in index_keywords:
-        if kw in user_text.upper():
-            market_context = await fetch_index_quote(kw)
-            break
+    # 1. Fetch Index Data First (NSEI, NIFTY, SENSEX)
+    market_context = await fetch_index_quote(user_text)
 
-    # If not an index, search for stock tickers
+    # 2. Fallback to Equity Stock Quote (NVDA, AAPL)
     if not market_context:
         name_map = {
             "NVIDIA": "NVDA", "APPLE": "AAPL", "MICROSOFT": "MSFT", 
