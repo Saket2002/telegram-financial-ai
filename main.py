@@ -116,13 +116,25 @@ async def transcribe_telegram_voice(file_id: str) -> str:
         return ""
 
 # ==========================================
-# ONBOARDING FLOW
+# ONBOARDING FLOW WITH SMART INTENT GUARD
 # ==========================================
 
 async def handle_onboarding(chat_id: int, user_text: str) -> bool:
     """Conversational onboarding sequence asking for role and watchlist"""
     profile = user_profiles.get(chat_id, {"step": 0, "role": None, "watchlist": []})
     
+    # Check if user is asking a direct market query during onboarding
+    text_upper = user_text.upper()
+    financial_keywords = ["PRICE", "STOCK", "NVDA", "AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "META", "VALUATION", "MARKET"]
+    if any(keyword in text_upper for keyword in financial_keywords) and profile["step"] in [1, 2]:
+        # Fast-track onboarding completion so the user query is processed immediately
+        user_profiles[chat_id] = {
+            "step": 3,
+            "role": "Finance Professional",
+            "watchlist": ["NVDA", "AAPL", "MSFT"]
+        }
+        return False  # Hand off directly to main AI analysis pipeline
+
     if profile["step"] == 0:
         greeting = (
             "Welcome! I am your personal AI Financial Analyst.\n\n"
@@ -134,12 +146,12 @@ async def handle_onboarding(chat_id: int, user_text: str) -> bool:
         return True
 
     elif profile["step"] == 1:
-        profile["role"] = user_text
+        profile["role"] = user_text.strip()
         profile["step"] = 2
         user_profiles[chat_id] = profile
         
         reply = (
-            f"Got it—customizing intelligence for a **{user_text}**.\n\n"
+            f"Got it—customizing intelligence for a **{user_text.strip()}**.\n\n"
             "Which key companies, tickers, or sectors do you follow most closely? "
             "(e.g., *Nvidia, Apple, TSLA, Semiconductor industry*)"
         )
